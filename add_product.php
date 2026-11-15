@@ -2,8 +2,8 @@
 session_start();
 require_once '../config.php';
 
-// التحقق من صلاحيات المشرف (تم التأكد من وجود الجلسة)
-if (!isset($_SESSION['admin']) || $_SESSION['admin'] != 1) {
+// التحقق من صلاحيات المشرف (تم تعديل اسم المتغير ليتوافق مع login.php)
+if (!isset($_SESSION['is_admin']) || $_SESSION['is_admin'] != 1) {
     header('Location: ../login.php');
     exit;
 }
