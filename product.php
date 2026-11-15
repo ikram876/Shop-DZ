@@ -1,108 +1,205 @@
 <?php
+error_reporting(E_ALL);
+ini_set('display_errors', 0); // إخفاء الأخطاء في الإنتاج
+ini_set('log_errors', 1);
+ini_set('error_log', __DIR__ . '/php-error.log');
 session_start();
+
 require_once 'config.php';
 
+// ========== جلب معرف المنتج ==========
 $product_id = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
-if ($product_id === 0) {
+if ($product_id <= 0) {
     header('Location: index.php');
     exit;
 }
 
-// حذف تقييم
-if (isset($_GET['delete_review']) && isset($_SESSION['user_id'])) {
-    $review_id = intval($_GET['delete_review']);
-    $stmt_del = $conn->prepare("DELETE FROM reviews WHERE id = ? AND user_id = ?");
-    $stmt_del->bind_param("ii", $review_id, $_SESSION['user_id']);
-    $stmt_del->execute();
-    header("Location: product.php?id=$product_id");
-    exit;
-}
+// ========== معالجة طلبات POST (السلة، المفضلة، التقييم) ==========
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    header('Content-Type: application/json; charset=utf-8');
+    $response = ['success' => false, 'message' => ''];
+    $action = $_POST['action'];
 
-// تعديل تقييم
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['edit_review'])) {
-    $review_id = intval($_POST['review_id']);
-    $rating = intval($_POST['edit_rating'] ?? 0);
-    $comment = trim($_POST['edit_comment'] ?? '');
-    
-    if ($rating >= 1 && $rating <= 5 && !empty($comment)) {
-        $stmt_edit = $conn->prepare("UPDATE reviews SET rating = ?, comment = ? WHERE id = ? AND user_id = ?");
-        $stmt_edit->bind_param("isii", $rating, $comment, $review_id, $_SESSION['user_id']);
-        $stmt_edit->execute();
-        header("Location: product.php?id=$product_id");
-        exit;
-    }
-}
-
-// جلب المنتج
-$stmt = $conn->prepare("SELECT * FROM products WHERE id = ?");
-$stmt->bind_param("i", $product_id);
-$stmt->execute();
-$result = $stmt->get_result();
-
-if ($result->num_rows === 0) {
-    header('Location: index.php');
-    exit;
-}
-
-$product = $result->fetch_assoc();
-
-// حساب التقييم
-$rating_query = $conn->query("SELECT AVG(rating) as avg_rating, COUNT(*) as total_reviews FROM reviews WHERE product_id = $product_id");
-$rating_data = $rating_query->fetch_assoc();
-$avg_rating = round($rating_data['avg_rating'] ?? 0, 1);
-$total_reviews = $rating_data['total_reviews'] ?? 0;
-
-// إضافة تقييم جديد
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_review'])) {
-    if (!isset($_SESSION['user_id'])) {
-        $error_msg = 'يجب تسجيل الدخول لإضافة تقييم';
-    } else {
-        $rating = intval($_POST['rating'] ?? 0);
-        $comment = trim($_POST['comment'] ?? '');
+    // 1. إضافة إلى السلة
+    if ($action === 'add_to_cart' && isset($_POST['product_id'])) {
+        $pid = intval($_POST['product_id']);
+        $quantity = isset($_POST['quantity']) ? intval($_POST['quantity']) : 1;
         
-        if ($rating < 1 || $rating > 5) {
-            $error_msg = 'يرجى اختيار تقييم من 1 إلى 5';
-        } elseif (empty($comment)) {
-            $error_msg = 'يرجى كتابة تعليق';
+        // توحيد بنية السلة لتتوافق مع cart.php
+        if (!isset($_SESSION['cart'])) $_SESSION['cart'] = [];
+        if (isset($_SESSION['cart'][$pid])) {
+            $_SESSION['cart'][$pid]['quantity'] += $quantity;
         } else {
-            $check = $conn->prepare("SELECT id FROM reviews WHERE product_id = ? AND user_id = ?");
-            $check->bind_param("ii", $product_id, $_SESSION['user_id']);
-            $check->execute();
-            if ($check->get_result()->num_rows > 0) {
-                $error_msg = 'لقد قمت بتقييم هذا المنتج مسبقاً';
+            $_SESSION['cart'][$pid] = ['quantity' => $quantity];
+        }
+        $response['success'] = true;
+        $response['message'] = 'تمت إضافة المنتج إلى السلة';
+    }
+
+    // 2. إضافة/إزالة من المفضلة
+    if ($action === 'toggle_wishlist' && isset($_POST['product_id'])) {
+        $pid = intval($_POST['product_id']);
+        if (!isset($_SESSION['wishlist'])) $_SESSION['wishlist'] = [];
+        $index = array_search($pid, $_SESSION['wishlist']);
+        if ($index !== false) {
+            unset($_SESSION['wishlist'][$index]);
+            $_SESSION['wishlist'] = array_values($_SESSION['wishlist']);
+            $response['message'] = 'تمت الإزالة من المفضلة';
+            $response['action'] = 'removed';
+        } else {
+            $_SESSION['wishlist'][] = $pid;
+            $response['message'] = 'تمت الإضافة إلى المفضلة';
+            $response['action'] = 'added';
+        }
+        $response['success'] = true;
+    }
+
+    // 3. إضافة تقييم
+    if ($action === 'submit_review') {
+        if (!isset($_SESSION['user_id'])) {
+            $response['message'] = 'يجب تسجيل الدخول لإضافة تقييم';
+        } else {
+            $rating = intval($_POST['rating'] ?? 0);
+            $comment = trim($_POST['comment'] ?? '');
+            if ($rating < 1 || $rating > 5) {
+                $response['message'] = 'يرجى اختيار تقييم من 1 إلى 5';
+            } elseif (empty($comment)) {
+                $response['message'] = 'يرجى كتابة تعليق';
             } else {
-                $stmt_review = $conn->prepare("INSERT INTO reviews (product_id, user_id, rating, comment) VALUES (?, ?, ?, ?)");
-                $stmt_review->bind_param("iiis", $product_id, $_SESSION['user_id'], $rating, $comment);
-                if ($stmt_review->execute()) {
-                    header("Location: product.php?id=$product_id");
-                    exit;
+                // التحقق من عدم التقييم المسبق
+                $check = $conn->prepare("SELECT id FROM reviews WHERE product_id = ? AND user_id = ?");
+                $check->bind_param("ii", $product_id, $_SESSION['user_id']);
+                $check->execute();
+                if ($check->get_result()->num_rows > 0) {
+                    $response['message'] = 'لقد قمت بتقييم هذا المنتج مسبقاً';
+                } else {
+                    $stmt = $conn->prepare("INSERT INTO reviews (product_id, user_id, rating, comment) VALUES (?, ?, ?, ?)");
+                    $stmt->bind_param("iiis", $product_id, $_SESSION['user_id'], $rating, $comment);
+                    if ($stmt->execute()) {
+                        $response['success'] = true;
+                        $response['message'] = 'تمت إضافة تقييمك بنجاح';
+                    }
                 }
             }
         }
     }
+
+    echo json_encode($response);
+    exit;
 }
 
-// جلب التعليقات
-$reviews = $conn->query("SELECT r.*, u.username FROM reviews r JOIN users u ON r.user_id = u.id WHERE r.product_id = $product_id ORDER BY r.created_at DESC");
+// ========== جلب معلومات المنتج ==========
+$product = null;
+$specifications = [];
+$product_features = [];
+$similar_products = [];
+$gallery_images = [];
 
-// منتجات مشابهة
-$stmt_similar = $conn->prepare("SELECT * FROM products WHERE category = ? AND id != ? LIMIT 4");
-$stmt_similar->bind_param("si", $product['category'], $product_id);
-$stmt_similar->execute();
-$similar_products = $stmt_similar->get_result();
+try {
+    // جلب المنتج
+    $stmt = $conn->prepare("SELECT * FROM products WHERE id = ?");
+    $stmt->bind_param("i", $product_id);
+    $stmt->execute();
+    $product = $stmt->get_result()->fetch_assoc();
+    
+    if (!$product) {
+        header('Location: index.php');
+        exit;
+    }
+    
+    // جلب صور المعرض
+    $stmt_gallery = $conn->prepare("SELECT image FROM product_images WHERE product_id = ?");
+    $stmt_gallery->bind_param("i", $product_id);
+    $stmt_gallery->execute();
+    $result_gallery = $stmt_gallery->get_result();
+    while ($row = $result_gallery->fetch_assoc()) {
+        $gallery_images[] = $row['image'];
+    }
+    if (empty($gallery_images) && !empty($product['image'])) {
+        $gallery_images[] = $product['image'];
+    }
+    
+    // جلب المواصفات
+    $stmt_specs = $conn->prepare("SELECT * FROM specifications WHERE product_id = ?");
+    $stmt_specs->bind_param("i", $product_id);
+    $stmt_specs->execute();
+    $result_specs = $stmt_specs->get_result();
+    while ($row = $result_specs->fetch_assoc()) {
+        $specifications[] = $row;
+    }
+    
+    // جلب الميزات
+    $stmt_features = $conn->prepare("SELECT * FROM product_features WHERE product_id = ?");
+    $stmt_features->bind_param("i", $product_id);
+    $stmt_features->execute();
+    $result_features = $stmt_features->get_result();
+    while ($row = $result_features->fetch_assoc()) {
+        $product_features[] = $row;
+    }
+    
+    // جلب منتجات مشابهة
+    if (!empty($product['category'])) {
+        $stmt_similar = $conn->prepare("SELECT * FROM products WHERE category = ? AND id != ? LIMIT 3");
+        $stmt_similar->bind_param("si", $product['category'], $product_id);
+        $stmt_similar->execute();
+        $result_similar = $stmt_similar->get_result();
+        while ($row = $result_similar->fetch_assoc()) {
+            $similar_products[] = $row;
+        }
+    }
+} catch (Exception $e) {
+    error_log("Error in product.php: " . $e->getMessage());
+}
 
-$is_logged_in = isset($_SESSION['user_id']);
-$is_admin = isset($_SESSION['is_admin']) && $_SESSION['is_admin'] == 1;
-$username = $_SESSION['username'] ?? '';
-$user_id = $_SESSION['user_id'] ?? 0;
+// ========== نظام التقييمات ==========
+$avg_rating = 0;
+$total_reviews = 0;
+$reviews_list = [];
+$user_has_reviewed = false;
 
+try {
+    // حساب المتوسط والعدد
+    $stmt_avg = $conn->prepare("SELECT AVG(rating) as avg_r, COUNT(*) as total FROM reviews WHERE product_id = ?");
+    $stmt_avg->bind_param("i", $product_id);
+    $stmt_avg->execute();
+    $rating_data = $stmt_avg->get_result()->fetch_assoc();
+    $avg_rating = round($rating_data['avg_r'] ?? 0, 1);
+    $total_reviews = $rating_data['total'] ?? 0;
+
+    // جلب التعليقات
+    $stmt_reviews = $conn->prepare("SELECT r.*, u.username FROM reviews r JOIN users u ON r.user_id = u.id WHERE r.product_id = ? ORDER BY r.created_at DESC");
+    $stmt_reviews->bind_param("i", $product_id);
+    $stmt_reviews->execute();
+    $result_reviews = $stmt_reviews->get_result();
+    while ($row = $result_reviews->fetch_assoc()) {
+        $reviews_list[] = $row;
+        if (isset($_SESSION['user_id']) && $row['user_id'] == $_SESSION['user_id']) {
+            $user_has_reviewed = true;
+        }
+    }
+} catch (Exception $e) {
+    error_log("Error fetching reviews: " . $e->getMessage());
+}
+
+// ========== إحصائيات ==========
 $cart_count = 0;
 if (isset($_SESSION['cart'])) {
-    foreach ($_SESSION['cart'] as $item) $cart_count += $item['quantity'] ?? 1;
+    foreach ($_SESSION['cart'] as $item) {
+        $cart_count += isset($item['quantity']) ? $item['quantity'] : 1;
+    }
 }
-$wishlist_count = 0;
-if (isset($_SESSION['wishlist'])) $wishlist_count = count($_SESSION['wishlist']);
+$wishlist_count = isset($_SESSION['wishlist']) ? count($_SESSION['wishlist']) : 0;
+$is_logged_in = isset($_SESSION['user_id']);
+$username = $_SESSION['username'] ?? '';
+
+// ========== حساب الخصم ==========
+$has_discount = isset($product['old_price']) && $product['old_price'] > 0 && $product['old_price'] > $product['price'];
+$discount_percent = $has_discount ? round((1 - $product['price'] / $product['old_price']) * 100) : 0;
+
+$product_image = !empty($product['image']) ? $product['image'] : 'assets/images/placeholder.jpg';
+$stock_status = $product['stock_status'] ?? 'in_stock';
+$is_in_wishlist = in_array($product_id, $_SESSION['wishlist'] ?? []);
 ?>
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -111,211 +208,298 @@ if (isset($_SESSION['wishlist'])) $wishlist_count = count($_SESSION['wishlist'])
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?php echo htmlspecialchars($product['name']); ?> | متجري</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&display=swap" rel="stylesheet">
     <style>
-        :root { --primary: #2563eb; --primary-dark: #1d4ed8; --primary-light: #eff6ff; --bg: #f8fafc; --white: #ffffff; --text: #1e293b; --text-light: #64748b; --border: #e2e8f0; --danger: #ef4444; --success: #10b981; --star: #f59e0b; --header-height: 60px; }
+        /* ===== الأنماط الأساسية ===== */
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Segoe UI', Tahoma, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
-        
-        .header { background: var(--white); border-bottom: 1px solid var(--border); padding: 0 20px; height: var(--header-height); display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
-        .logo { font-size: 1.3rem; font-weight: 900; color: var(--primary); text-decoration: none; display: flex; align-items: center; gap: 7px; }
+        body { font-family: 'Tajawal', sans-serif; background: #f1f5f9; color: #0f172a; line-height: 1.7; }
+        a { text-decoration: none; color: inherit; }
+        img { max-width: 100%; display: block; }
+
+        /* ===== الهيدر ===== */
+        .header { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.06); position: sticky; top: 0; z-index: 1000; border-bottom: 3px solid #2563eb; padding: 12px 5%; }
+        .header-top { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+        .logo { font-size: 28px; font-weight: 900; }
+        .logo .mat { color: #0f172a; } .logo .jari { color: #2563eb; }
+        .nav-links { display: flex; gap: 25px; list-style: none; }
+        .nav-links a { font-weight: 500; color: #64748b; transition: 0.3s; font-size: 14px; }
+        .nav-links a:hover { color: #2563eb; }
+        .search-box { flex: 1; max-width: 400px; display: flex; border: 2px solid #e2e8f0; border-radius: 50px; overflow: hidden; background: #f1f5f9; }
+        .search-box input { flex: 1; border: none; padding: 10px 20px; font-family: 'Tajawal', sans-serif; font-size: 14px; outline: none; background: transparent; }
+        .search-box button { border: none; background: #2563eb; color: #fff; padding: 10px 22px; cursor: pointer; }
         .header-actions { display: flex; align-items: center; gap: 8px; }
-        .icon-btn { color: var(--text); text-decoration: none; font-size: 1.1rem; padding: 7px 9px; border-radius: 8px; position: relative; transition: all 0.2s; display: flex; align-items: center; }
-        .icon-btn:hover { background: var(--bg); color: var(--primary); }
-        .badge-counter { position: absolute; top: 0; right: 0; background: var(--danger); color: white; font-size: 0.5rem; font-weight: 900; min-width: 16px; height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
-        .btn { padding: 8px 16px; border-radius: 50px; text-decoration: none; font-weight: 600; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 5px; border: none; cursor: pointer; font-family: inherit; }
-        .btn-outline { background: transparent; color: var(--primary); border: 1.5px solid var(--primary); } .btn-outline:hover { background: var(--primary); color: white; }
-        .btn-primary { background: var(--primary); color: white; } .btn-primary:hover { background: var(--primary-dark); }
-        .btn-sm { padding: 6px 12px; font-size: 0.75rem; border-radius: 8px; }
+        .icon-btn { position: relative; color: #0f172a; font-size: 20px; padding: 8px 12px; border-radius: 10px; background: transparent; border: none; cursor: pointer; }
+        .icon-btn:hover { background: #eff6ff; color: #2563eb; }
+        .badge { position: absolute; top: 0; right: 0; background: #ef4444; color: #fff; font-size: 10px; font-weight: 900; min-width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid #fff; }
 
-        .container { max-width: 1100px; margin: 30px auto; padding: 0 20px; }
-        .breadcrumb { margin-bottom: 20px; font-size: 0.9rem; color: var(--text-light); }
-        .breadcrumb a { color: var(--primary); text-decoration: none; } .breadcrumb a:hover { text-decoration: underline; }
+        /* ===== صفحة المنتج ===== */
+        .product-page { max-width: 1200px; margin: 30px auto; padding: 0 20px; }
+        .product-container { display: grid; grid-template-columns: 1fr 1fr; gap: 50px; background: #fff; border-radius: 16px; padding: 40px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
 
-        .product-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; background: var(--white); border-radius: 20px; padding: 30px; box-shadow: 0 2px 15px rgba(0,0,0,0.05); border: 1px solid var(--border); margin-bottom: 40px; }
-        .product-image { border-radius: 16px; overflow: hidden; background: #f1f5f9; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; }
-        .product-image img { width: 100%; height: 100%; object-fit: cover; }
-        .product-info { display: flex; flex-direction: column; }
-        .product-info .category { color: var(--primary); font-weight: 600; font-size: 0.85rem; margin-bottom: 10px; display: inline-block; background: var(--primary-light); padding: 5px 14px; border-radius: 20px; align-self: flex-start; }
-        .product-info h1 { font-size: 1.8rem; font-weight: 800; margin-bottom: 15px; line-height: 1.3; }
-        .rating-display { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
-        .stars-display { color: var(--star); font-size: 1.1rem; }
-        .rating-number { font-weight: 700; font-size: 1rem; }
-        .rating-count { color: var(--text-light); font-size: 0.85rem; }
-        .price { font-size: 2rem; font-weight: 900; color: var(--primary); margin-bottom: 20px; }
-        .description { color: var(--text-light); line-height: 2; margin-bottom: 25px; font-size: 0.95rem; }
+        /* ===== معرض الصور ===== */
+        .product-gallery { position: relative; }
+        .product-gallery .main-image { background: #f1f5f9; border-radius: 16px; padding: 30px; display: flex; align-items: center; justify-content: center; min-height: 400px; border: 1px solid #e2e8f0; }
+        .product-gallery .main-image img { max-height: 400px; max-width: 100%; object-fit: contain; }
+        .product-gallery .badge { position: absolute; top: 15px; left: 15px; padding: 6px 18px; border-radius: 50px; font-weight: 700; font-size: 12px; color: #fff; z-index: 5; }
+        .badge-sale { background: #ef4444; } .badge-new { background: #2563eb; }
+        .thumbnails { display: flex; gap: 12px; margin-top: 15px; flex-wrap: wrap; }
+        .thumbnails img { width: 80px; height: 80px; object-fit: cover; border-radius: 10px; cursor: pointer; border: 2px solid #e2e8f0; transition: 0.3s; }
+        .thumbnails img:hover, .thumbnails img.active { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.2); }
+
+        /* ===== معلومات المنتج ===== */
+        .product-info h1 { font-size: 28px; font-weight: 900; margin-bottom: 8px; }
+        .product-info .rating { display: flex; align-items: center; gap: 12px; color: #64748b; font-size: 14px; margin-bottom: 12px; flex-wrap: wrap; }
+        .product-info .rating .stars { color: #fbbf24; letter-spacing: 2px; font-size: 16px; }
+        .product-info .rating .in-stock { color: #22c55e; font-weight: 700; background: #dcfce7; padding: 2px 14px; border-radius: 20px; font-size: 12px; }
+        .product-info .price { display: flex; align-items: center; gap: 15px; margin-bottom: 15px; flex-wrap: wrap; }
+        .product-info .price .current { font-size: 32px; font-weight: 900; color: #0f172a; }
+        .product-info .price .old { font-size: 20px; color: #64748b; text-decoration: line-through; }
+        .product-info .price .discount { font-size: 13px; font-weight: 700; color: #22c55e; background: #dcfce7; padding: 3px 14px; border-radius: 20px; }
+        .product-info .description { font-size: 15px; color: #64748b; line-height: 1.8; margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid #e2e8f0; }
         
-        .action-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
-        .btn-add-cart { flex: 1; min-width: 180px; padding: 14px 20px; background: var(--primary); color: white; border: none; border-radius: 12px; font-family: inherit; font-weight: 700; font-size: 1rem; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.2s; }
-        .btn-add-cart:hover { background: var(--primary-dark); }
-        .btn-wishlist { padding: 14px 20px; background: transparent; color: var(--danger); border: 2px solid #fecaca; border-radius: 12px; font-family: inherit; font-weight: 700; font-size: 0.95rem; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s; white-space: nowrap; }
-        .btn-wishlist:hover { background: #fef2f2; }
-        .btn-wishlist.active { background: #fee2e2; border-color: var(--danger); }
-        .btn-edit { display: inline-flex; align-items: center; gap: 4px; padding: 6px 12px; background: #fef3c7; color: #92400e; border-radius: 6px; text-decoration: none; font-size: 0.75rem; font-weight: 700; margin-top: 15px; align-self: flex-start; }
-
-        .reviews-section { background: var(--white); border-radius: 20px; padding: 30px; box-shadow: 0 2px 15px rgba(0,0,0,0.05); border: 1px solid var(--border); margin-bottom: 30px; }
-        .reviews-section h2 { font-size: 1.3rem; font-weight: 800; margin-bottom: 25px; }
+        .select-finish { margin-bottom: 20px; }
+        .finish-title { font-size: 14px; font-weight: 700; color: #64748b; text-transform: uppercase; margin-bottom: 10px; }
+        .finish-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+        .finish-item { display: flex; align-items: center; gap: 10px; background: #f1f5f9; padding: 10px 14px; border-radius: 10px; font-weight: 500; font-size: 13px; }
+        .finish-item i { font-size: 18px; color: #2563eb; }
         
+        .product-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 15px; }
+        .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 30px; border-radius: 50px; font-weight: 700; font-size: 15px; transition: all 0.3s; cursor: pointer; border: none; font-family: inherit; }
+        .btn-primary { background: #2563eb; color: #fff; } .btn-primary:hover { background: #1d4ed8; transform: translateY(-2px); box-shadow: 0 8px 25px rgba(37,99,235,0.3); }
+        .btn-success { background: #22c55e; color: #fff; } .btn-success:hover { background: #16a34a; transform: translateY(-2px); }
+        .btn-outline { background: transparent; color: #0f172a; border: 2px solid #e2e8f0; padding: 12px 16px; } .btn-outline:hover, .btn-outline.active { border-color: #ef4444; color: #ef4444; background: #fef2f2; }
+        
+        .product-extras { display: flex; gap: 20px; flex-wrap: wrap; padding-top: 15px; border-top: 1px solid #e2e8f0; }
+        .product-extras span { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #64748b; }
+        .product-extras i { color: #2563eb; }
+
+        /* ===== المواصفات ===== */
+        .specifications-section { margin-top: 30px; background: #fff; border-radius: 16px; padding: 35px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+        .specifications-section h2 { font-size: 22px; font-weight: 900; margin-bottom: 18px; }
+        .specs-container { display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; }
+        .spec-group h3 { font-size: 16px; font-weight: 700; margin-bottom: 10px; border-bottom: 2px solid #eff6ff; padding-bottom: 8px; }
+        .spec-group ul { list-style: none; }
+        .spec-group ul li { display: flex; justify-content: space-between; padding: 6px 0; font-size: 14px; border-bottom: 1px solid #e2e8f0; }
+        .spec-group ul li .key { color: #64748b; } .spec-group ul li .value { font-weight: 600; }
+
+        /* ===== التقييمات ===== */
+        .reviews-section { margin-top: 30px; background: #fff; border-radius: 16px; padding: 35px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+        .reviews-section h2 { font-size: 22px; font-weight: 900; margin-bottom: 20px; }
         .review-form { background: #f8fafc; border-radius: 12px; padding: 20px; margin-bottom: 30px; }
-        .review-form h4 { margin-bottom: 15px; font-size: 1rem; }
+        .review-form textarea { width: 100%; padding: 12px; border: 2px solid #e2e8f0; border-radius: 10px; font-family: inherit; min-height: 80px; margin-bottom: 12px; }
         .star-rating { display: flex; gap: 5px; margin-bottom: 15px; direction: ltr; justify-content: flex-end; }
         .star-rating input { display: none; }
-        .star-rating label { font-size: 1.5rem; color: #d1d5db; cursor: pointer; transition: all 0.1s; }
-        .star-rating input:checked ~ label, .star-rating label:hover, .star-rating label:hover ~ label { color: var(--star); }
-        .review-form textarea { width: 100%; padding: 12px; border: 2px solid var(--border); border-radius: 10px; font-family: inherit; font-size: 0.9rem; resize: vertical; min-height: 80px; margin-bottom: 12px; }
-        .review-form textarea:focus { outline: none; border-color: var(--primary); }
-        .alert { padding: 12px 16px; border-radius: 10px; margin-bottom: 15px; font-weight: 600; font-size: 0.9rem; }
-        .alert-error { background: #fee2e2; color: #991b1b; }
-        .alert-success { background: #d1fae5; color: #065f46; }
-
-        .review-item { border-bottom: 1px solid var(--border); padding: 18px 0; }
+        .star-rating label { font-size: 1.5rem; color: #d1d5db; cursor: pointer; transition: 0.1s; }
+        .star-rating input:checked ~ label, .star-rating label:hover, .star-rating label:hover ~ label { color: #f59e0b; }
+        .review-item { border-bottom: 1px solid #e2e8f0; padding: 18px 0; }
         .review-item:last-child { border-bottom: none; }
-        .review-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-        .review-author { font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 10px; }
-        .review-date { font-size: 0.8rem; color: var(--text-light); }
-        .review-stars { color: var(--star); margin-bottom: 8px; font-size: 0.9rem; }
-        .review-text { color: var(--text-light); line-height: 1.8; }
-        .review-actions { display: flex; gap: 8px; margin-top: 8px; }
-        .btn-edit-review, .btn-delete-review { padding: 4px 10px; border-radius: 6px; font-size: 0.7rem; font-weight: 600; cursor: pointer; text-decoration: none; border: none; font-family: inherit; }
-        .btn-edit-review { background: #eff6ff; color: #2563eb; }
-        .btn-edit-review:hover { background: #dbeafe; }
-        .btn-delete-review { background: #fee2e2; color: #ef4444; }
-        .btn-delete-review:hover { background: #fecaca; }
+        .review-header { display: flex; justify-content: space-between; margin-bottom: 8px; font-weight: 700; }
+        .review-date { font-size: 0.8rem; color: #64748b; }
+        .review-stars { color: #f59e0b; margin-bottom: 8px; }
+        .review-text { color: #64748b; }
 
-        .edit-form { background: #f8fafc; border-radius: 10px; padding: 15px; margin-top: 10px; display: none; }
-        .edit-form.active { display: block; }
+        /* ===== منتجات مشابهة ===== */
+        .similar-products { margin-top: 50px; }
+        .similar-products h2 { font-size: 24px; font-weight: 900; margin-bottom: 20px; }
+        .similar-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        .similar-card { background: #fff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08); transition: 0.3s; border: 1px solid transparent; text-align: center; }
+        .similar-card:hover { transform: translateY(-4px); border-color: #2563eb; }
+        .similar-card .sim-image { background: #f1f5f9; height: 160px; display: flex; align-items: center; justify-content: center; padding: 15px; }
+        .similar-card .sim-info { padding: 12px 14px 16px; }
+        .similar-card .sim-info h3 { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+        .similar-card .add-btn { width: 100%; padding: 7px; border: none; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 700; font-size: 13px; cursor: pointer; margin-top: 8px; }
 
-        .section-title { font-size: 1.3rem; font-weight: 800; margin-bottom: 20px; }
-        .similar-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 15px; }
-        .similar-card { background: var(--white); border-radius: 12px; overflow: hidden; border: 1px solid var(--border); transition: all 0.2s; text-decoration: none; color: var(--text); }
-        .similar-card:hover { transform: translateY(-4px); box-shadow: 0 8px 25px rgba(0,0,0,0.1); }
-        .similar-card img { width: 100%; aspect-ratio: 1; object-fit: cover; }
-        .similar-card .info { padding: 12px; text-align: center; }
-        .similar-card .info h4 { font-size: 0.9rem; font-weight: 700; margin-bottom: 4px; }
-        .similar-card .info .price { font-weight: 800; color: var(--primary); font-size: 1rem; }
+        /* ===== الفوتر ===== */
+        footer { background: #0f172a; color: #94a3b8; padding: 50px 5% 30px; margin-top: 50px; }
+        footer h3, footer h4 { color: #fff; }
+        footer a { color: #94a3b8; } footer a:hover { color: #fff; }
 
-        .footer { background: var(--white); border-top: 1px solid var(--border); padding: 25px 20px; text-align: center; font-size: 0.85rem; color: var(--text-light); margin-top: 50px; }
-
-        @media (max-width: 768px) { 
-            .product-detail { grid-template-columns: 1fr; padding: 20px; } 
-            .product-info h1 { font-size: 1.3rem; } 
-            .price { font-size: 1.5rem; } 
-            .action-buttons { flex-direction: column; } 
+        /* ===== استجابة ===== */
+        @media (max-width: 992px) {
+            .product-container { grid-template-columns: 45% 55%; gap: 20px; padding: 25px; }
+            .product-gallery .main-image { min-height: 280px; }
+            .nav-links { display: none; }
+            .similar-grid, .specs-container { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (max-width: 768px) {
+            .header-top { flex-wrap: wrap; }
+            .search-box { order: 3; flex-basis: 100%; max-width: 100%; }
+            .product-container { grid-template-columns: 1fr; padding: 18px; }
+            .specs-container { grid-template-columns: 1fr; }
+            .similar-grid { grid-template-columns: 1fr 1fr; gap: 15px; }
+            .product-actions .btn { flex: 1; justify-content: center; }
+        }
+        @media (max-width: 480px) {
+            .similar-grid { grid-template-columns: 1fr; }
         }
     </style>
 </head>
 <body>
 
-<div style="background:#fef3c7;color:#92400e;text-align:center;padding:10px;font-size:0.85rem;font-weight:600;border-bottom:1px solid #fde68a;">
-    ⚠️ موقع تجريبي | هذا المتجر غير فعال حالياً | لشراء الموقع أو الاستفسار: 
-    <a href="mailto:benmirikram74@gmail.com" style="color:#2563eb;font-weight:700;">benmirikram74@gmail.com</a>
-</div>
-
-
+<!-- الهيدر -->
 <header class="header">
-    <a href="index.php" class="logo"><i class="fas fa-store"></i> متجري</a>
-    <div class="header-actions">
-        <a href="wishlist.php" class="icon-btn"><i class="fas fa-heart"></i><?php if($wishlist_count>0): ?><span class="badge-counter"><?php echo $wishlist_count; ?></span><?php endif; ?></a>
-        <a href="cart.php" class="icon-btn"><i class="fas fa-shopping-cart"></i><?php if($cart_count>0): ?><span class="badge-counter"><?php echo $cart_count; ?></span><?php endif; ?></a>
-        <?php if($is_logged_in): ?>
-            <a href="logout.php" class="icon-btn" style="color:#ef4444;"><i class="fas fa-sign-out-alt"></i></a>
-        <?php else: ?>
-            <a href="login.php" class="btn btn-outline">دخول</a>
-        <?php endif; ?>
+    <div class="header-top">
+        <a href="index.php" class="logo"><span class="mat">Mat</span><span class="jari">jari</span></a>
+        <ul class="nav-links">
+            <li><a href="index.php">الرئيسية</a></li>
+            <li><a href="offers.php">العروض</a></li>
+            <li><a href="new-arrivals.php">وصل حديثاً</a></li>
+            <li><a href="best-sellers.php">الأكثر مبيعاً</a></li>
+        </ul>
+        <form class="search-box" method="GET" action="search.php">
+            <input type="text" name="q" placeholder="ابحث عن منتج...">
+            <button type="submit"><i class="fas fa-search"></i></button>
+        </form>
+        <div class="header-actions">
+            <?php if ($is_logged_in): ?>
+                <a href="profile.php" class="icon-btn"><i class="fas fa-user"></i></a>
+            <?php else: ?>
+                <a href="login.php" class="icon-btn"><i class="fas fa-user"></i></a>
+            <?php endif; ?>
+            <a href="wishlist.php" class="icon-btn"><i class="fas fa-heart"></i><?php if ($wishlist_count > 0): ?><span class="badge"><?php echo $wishlist_count; ?></span><?php endif; ?></a>
+            <a href="cart.php" class="icon-btn"><i class="fas fa-shopping-bag"></i><?php if ($cart_count > 0): ?><span class="badge"><?php echo $cart_count; ?></span><?php endif; ?></a>
+        </div>
     </div>
 </header>
 
-<div class="container">
-    <div class="breadcrumb">
-        <a href="index.php">الرئيسية</a> &gt;
-        <a href="index.php?cat=<?php echo urlencode($product['category']); ?>"><?php echo htmlspecialchars($product['category']); ?></a> &gt;
-        <?php echo htmlspecialchars($product['name']); ?>
-    </div>
-
-    <div class="product-detail">
-        <div class="product-image">
-            <img src="<?php echo !empty($product['image']) ? $product['image'] : 'images/placeholder.png'; ?>" 
-                 alt="<?php echo htmlspecialchars($product['name']); ?>"
-                 onerror="this.src='images/placeholder.png';">
+<!-- صفحة المنتج -->
+<main class="product-page">
+    <div class="product-container">
+        <!-- معرض الصور -->
+        <div class="product-gallery">
+            <div class="main-image">
+                <img src="<?php echo htmlspecialchars($gallery_images[0] ?? $product_image); ?>" alt="<?php echo htmlspecialchars($product['name']); ?>" id="mainImage" onerror="this.src='https://via.placeholder.com/600x600/e2e8f0/64748b?text=Matjari'">
+            </div>
+            <div class="thumbnails">
+                <?php 
+                $has_thumbs = false;
+                if (!empty($gallery_images)) {
+                    foreach ($gallery_images as $index => $img) {
+                        $img_safe = htmlspecialchars($img);
+                        $active = $index === 0 ? 'active' : '';
+                        echo '<img src="' . $img_safe . '" onclick="changeImage(\'' . $img_safe . '\', this)" class="' . $active . '">';
+                        $has_thumbs = true;
+                    }
+                }
+                ?>
+            </div>
+            <?php if ($has_discount && $discount_percent >= 20): ?>
+                <span class="badge badge-sale">خصم <?php echo $discount_percent; ?>%</span>
+            <?php elseif (isset($product['is_new']) && $product['is_new'] == 1): ?>
+                <span class="badge badge-new">جديد</span>
+            <?php endif; ?>
         </div>
 
+        <!-- معلومات المنتج -->
         <div class="product-info">
-            <span class="category"><?php echo htmlspecialchars($product['category']); ?></span>
             <h1><?php echo htmlspecialchars($product['name']); ?></h1>
-            
-            <div class="rating-display">
-                <div class="stars-display">
-                    <?php for ($i = 1; $i <= 5; $i++): ?>
-                        <?php if ($i <= round($avg_rating)): ?>
-                            <i class="fas fa-star"></i>
-                        <?php elseif ($i - 0.5 <= $avg_rating): ?>
-                            <i class="fas fa-star-half-alt"></i>
-                        <?php else: ?>
-                            <i class="far fa-star"></i>
-                        <?php endif; ?>
-                    <?php endfor; ?>
+            <div class="rating">
+                <span class="stars">
+                    <?php 
+                    for ($i = 1; $i <= 5; $i++) {
+                        echo ($i <= round($avg_rating)) ? '★' : '☆';
+                    }
+                    ?>
+                </span>
+                <span>(<?php echo $total_reviews; ?> تقييم)</span>
+                <?php if ($stock_status == 'in_stock'): ?>
+                    <span class="in-stock"><i class="fas fa-check-circle"></i> متوفر</span>
+                <?php endif; ?>
+            </div>
+
+            <div class="price">
+                <span class="current"><?php echo number_format($product['price'], 2); ?> ريال</span>
+                <?php if ($has_discount): ?>
+                    <span class="old"><?php echo number_format($product['old_price'], 2); ?> ريال</span>
+                    <span class="discount">وفر <?php echo $discount_percent; ?>%</span>
+                <?php endif; ?>
+            </div>
+
+            <div class="description"><?php echo nl2br(htmlspecialchars($product['description'] ?? 'وصف المنتج غير متوفر حالياً.')); ?></div>
+
+            <?php if (!empty($product_features)): ?>
+            <div class="select-finish">
+                <div class="finish-title">اختر الميزات</div>
+                <div class="finish-grid">
+                    <?php foreach ($product_features as $feature): ?>
+                        <div class="finish-item">
+                            <i class="fas <?php echo htmlspecialchars($feature['icon'] ?? 'fa-star'); ?>"></i>
+                            <div>
+                                <div><?php echo htmlspecialchars($feature['title']); ?></div>
+                                <div class="sub"><?php echo htmlspecialchars($feature['subtitle'] ?? ''); ?></div>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
                 </div>
-                <span class="rating-number"><?php echo $avg_rating; ?></span>
-                <span class="rating-count">(<?php echo $total_reviews; ?> تقييم)</span>
             </div>
-
-            <div class="price"><?php echo number_format($product['price'], 2); ?> ريال</div>
-            
-            <?php if(!empty($product['description'])): ?>
-                <p class="description"><?php echo nl2br(htmlspecialchars($product['description'])); ?></p>
             <?php endif; ?>
 
-            <div class="action-buttons">
-                <button class="btn-add-cart" onclick="addToCart(<?php echo $product['id']; ?>, '<?php echo htmlspecialchars($product['name'], ENT_QUOTES); ?>', <?php echo $product['price']; ?>)">
-                    <i class="fas fa-cart-plus"></i> أضف إلى السلة
-                </button>
-                <button class="btn-wishlist <?php echo (isset($_SESSION['wishlist']) && in_array($product['id'], $_SESSION['wishlist'])) ? 'active' : ''; ?>" 
-                        onclick="toggleWishlist(<?php echo $product['id']; ?>, this)">
-                    <i class="fas fa-heart"></i> المفضلة
-                </button>
+            <div class="product-actions">
+                <button class="btn btn-primary" onclick="addToCart()"><i class="fas fa-shopping-cart"></i> أضف للسلة</button>
+                <button class="btn btn-success" onclick="buyNow()"><i class="fas fa-bolt"></i> اشترِ الآن</button>
+                <button class="btn btn-outline <?php echo $is_in_wishlist ? 'active' : ''; ?>" onclick="toggleWishlist()" id="wishlistBtn"><i class="fas fa-heart"></i></button>
             </div>
 
-            <?php if($is_admin): ?>
-                <a href="admin/edit_product.php?id=<?php echo $product['id']; ?>" class="btn-edit">
-                    <i class="fas fa-edit"></i> تعديل المنتج
-                </a>
-            <?php endif; ?>
+            <div class="product-extras">
+                <span><i class="fas fa-truck-fast"></i> توصيل مجاني</span>
+                <span><i class="fas fa-shield"></i> ضمان سنتين</span>
+            </div>
         </div>
     </div>
 
-    <div class="reviews-section">
+    <!-- المواصفات -->
+    <?php if (!empty($specifications)): ?>
+    <section class="specifications-section">
+        <h2><i class="fas fa-microchip"></i> المواصفات التقنية</h2>
+        <div class="specs-container">
+            <?php 
+            $chunk_size = ceil(count($specifications) / 3);
+            $groups = array_chunk($specifications, $chunk_size);
+            foreach ($groups as $group): ?>
+                <div class="spec-group">
+                    <h3><?php echo htmlspecialchars($group[0]['key'] ?? 'المواصفات'); ?></h3>
+                    <ul>
+                        <?php foreach ($group as $spec): ?>
+                            <li><span class="key"><?php echo htmlspecialchars($spec['key']); ?></span><span class="value"><?php echo htmlspecialchars($spec['value']); ?></span></li>
+                        <?php endforeach; ?>
+                    </ul>
+                </div>
+            <?php endforeach; ?>
+        </div>
+    </section>
+    <?php endif; ?>
+
+    <!-- التقييمات -->
+    <section class="reviews-section">
         <h2>التقييمات والمراجعات (<?php echo $total_reviews; ?>)</h2>
         
         <?php if ($is_logged_in): ?>
-            <div class="review-form">
-                <h4>أضف تقييمك</h4>
-                <?php if (isset($error_msg)): ?><div class="alert alert-error"><?php echo $error_msg; ?></div><?php endif; ?>
-                <form method="POST">
-                    <div class="star-rating">
-                        <?php for ($i = 5; $i >= 1; $i--): ?>
-                            <input type="radio" id="star<?php echo $i; ?>" name="rating" value="<?php echo $i; ?>" required>
-                            <label for="star<?php echo $i; ?>"><i class="fas fa-star"></i></label>
-                        <?php endfor; ?>
-                    </div>
-                    <textarea name="comment" placeholder="اكتب تعليقك عن المنتج..." required></textarea>
-                    <button type="submit" name="submit_review" class="btn btn-primary">إرسال التقييم</button>
-                </form>
-            </div>
+            <?php if (!$user_has_reviewed): ?>
+                <div class="review-form">
+                    <h4>أضف تقييمك</h4>
+                    <form id="reviewForm">
+                        <div class="star-rating">
+                            <?php for ($i = 5; $i >= 1; $i--): ?>
+                                <input type="radio" id="star<?php echo $i; ?>" name="rating" value="<?php echo $i; ?>" required>
+                                <label for="star<?php echo $i; ?>"><i class="fas fa-star"></i></label>
+                            <?php endfor; ?>
+                        </div>
+                        <textarea name="comment" placeholder="اكتب تعليقك..." required></textarea>
+                        <button type="submit" class="btn btn-primary">إرسال التقييم</button>
+                    </form>
+                </div>
+            <?php else: ?>
+                <p style="color:#64748b; margin-bottom:20px;">لقد قمت بتقييم هذا المنتج مسبقاً. شكراً لك!</p>
+            <?php endif; ?>
         <?php else: ?>
-            <div class="review-form" style="text-align:center;">
-                <p>يجب <a href="login.php" style="color:var(--primary);">تسجيل الدخول</a> لإضافة تقييم</p>
-            </div>
+            <p style="margin-bottom:20px;">يجب <a href="login.php" style="color:#2563eb;">تسجيل الدخول</a> لإضافة تقييم.</p>
         <?php endif; ?>
 
-        <?php if ($reviews && $reviews->num_rows > 0): ?>
-            <?php while ($review = $reviews->fetch_assoc()): ?>
-                <div class="review-item" id="review-<?php echo $review['id']; ?>">
+        <?php if (!empty($reviews_list)): ?>
+            <?php foreach ($reviews_list as $review): ?>
+                <div class="review-item">
                     <div class="review-header">
-                        <span class="review-author">
-                            <?php echo htmlspecialchars($review['username']); ?>
-                            <?php if ($review['user_id'] == $user_id): ?>
-                                <span style="background:#eff6ff;color:#2563eb;font-size:0.7rem;padding:2px 8px;border-radius:10px;">تعليقك</span>
-                            <?php endif; ?>
-                        </span>
+                        <span><?php echo htmlspecialchars($review['username']); ?></span>
                         <span class="review-date"><?php echo date('Y/m/d', strtotime($review['created_at'])); ?></span>
                     </div>
                     <div class="review-stars">
@@ -324,94 +508,177 @@ if (isset($_SESSION['wishlist'])) $wishlist_count = count($_SESSION['wishlist'])
                         <?php endfor; ?>
                     </div>
                     <p class="review-text"><?php echo nl2br(htmlspecialchars($review['comment'])); ?></p>
-                    
-                    <?php if ($review['user_id'] == $user_id): ?>
-                        <div class="review-actions">
-                            <button class="btn-edit-review" onclick="toggleEditForm(<?php echo $review['id']; ?>)">
-                                <i class="fas fa-edit"></i> تعديل
-                            </button>
-                            <a href="?delete_review=<?php echo $review['id']; ?>" class="btn-delete-review" 
-                               onclick="return confirm('هل أنت متأكد من حذف تقييمك؟')">
-                                <i class="fas fa-trash"></i> حذف
-                            </a>
-                        </div>
-                        
-                        <div class="edit-form" id="edit-form-<?php echo $review['id']; ?>">
-                            <form method="POST">
-                                <input type="hidden" name="review_id" value="<?php echo $review['id']; ?>">
-                                <div class="star-rating">
-                                    <?php for ($i = 5; $i >= 1; $i--): ?>
-                                        <input type="radio" id="edit-star-<?php echo $review['id']; ?>-<?php echo $i; ?>" name="edit_rating" value="<?php echo $i; ?>" <?php echo $review['rating'] == $i ? 'checked' : ''; ?>>
-                                        <label for="edit-star-<?php echo $review['id']; ?>-<?php echo $i; ?>"><i class="fas fa-star"></i></label>
-                                    <?php endfor; ?>
-                                </div>
-                                <textarea name="edit_comment" required><?php echo htmlspecialchars($review['comment']); ?></textarea>
-                                <button type="submit" name="edit_review" class="btn btn-primary btn-sm">حفظ التعديل</button>
-                                <button type="button" class="btn btn-outline btn-sm" onclick="toggleEditForm(<?php echo $review['id']; ?>)" style="margin-right:8px;">إلغاء</button>
-                            </form>
-                        </div>
-                    <?php endif; ?>
                 </div>
-            <?php endwhile; ?>
+            <?php endforeach; ?>
         <?php else: ?>
-            <p style="text-align:center;color:var(--text-light);padding:20px;">لا توجد تقييمات بعد. كن أول من يقيم هذا المنتج!</p>
+            <p style="text-align:center;color:#64748b;padding:20px;">لا توجد تقييمات بعد. كن أول من يقيم هذا المنتج!</p>
         <?php endif; ?>
-    </div>
+    </section>
 
-    <?php if($similar_products && $similar_products->num_rows > 0): ?>
-        <h2 class="section-title">منتجات مشابهة</h2>
+    <!-- منتجات مشابهة -->
+    <?php if (!empty($similar_products)): ?>
+    <section class="similar-products">
+        <h2>🔄 أكمل مجموعتك</h2>
         <div class="similar-grid">
-            <?php while($sim = $similar_products->fetch_assoc()): ?>
-                <a href="product.php?id=<?php echo $sim['id']; ?>" class="similar-card">
-                    <img src="<?php echo !empty($sim['image']) ? $sim['image'] : 'images/placeholder.png'; ?>" 
-                         alt="<?php echo htmlspecialchars($sim['name']); ?>"
-                         onerror="this.src='images/placeholder.png';">
-                    <div class="info">
-                        <h4><?php echo htmlspecialchars($sim['name']); ?></h4>
-                        <span class="price"><?php echo number_format($sim['price'], 2); ?> ريال</span>
+            <?php foreach ($similar_products as $similar): ?>
+                <div class="similar-card">
+                    <a href="product.php?id=<?php echo $similar['id']; ?>">
+                        <div class="sim-image">
+                            <img src="<?php echo htmlspecialchars($similar['image'] ?? 'assets/images/placeholder.jpg'); ?>" alt="<?php echo htmlspecialchars($similar['name']); ?>">
+                        </div>
+                    </a>
+                    <div class="sim-info">
+                        <a href="product.php?id=<?php echo $similar['id']; ?>"><h3><?php echo htmlspecialchars($similar['name']); ?></h3></a>
+                        <div class="price">
+                            <span class="current"><?php echo number_format($similar['price'], 2); ?> ريال</span>
+                        </div>
+                        <button class="add-btn" onclick="addSimilarToCart(<?php echo $similar['id']; ?>, this)"><i class="fas fa-plus"></i> أضف</button>
                     </div>
-                </a>
-            <?php endwhile; ?>
+                </div>
+            <?php endforeach; ?>
         </div>
+    </section>
     <?php endif; ?>
-</div>
+</main>
 
-<footer class="footer">
-    <p>© 2026 Developed by <strong>BEN MIR IKRAM</strong>. All rights reserved.</p>
+<!-- الفوتر -->
+<footer>
+    <div style="max-width:1200px;margin:0 auto;display:flex;flex-wrap:wrap;justify-content:space-between;gap:40px;">
+        <div style="flex:1;min-width:200px;">
+            <h3><i class="fas fa-store" style="color:#2563eb;"></i> متجري</h3>
+            <p style="font-size:14px;">وجهتك الأولى للتسوق الإلكتروني.</p>
+        </div>
+        <div style="flex:1;min-width:150px;">
+            <h4>روابط سريعة</h4>
+            <ul style="list-style:none;"><li><a href="index.php">الرئيسية</a></li><li><a href="about.php">من نحن</a></li></ul>
+        </div>
+        <div style="flex:1;min-width:150px;">
+            <h4>خدمة العملاء</h4>
+            <ul style="list-style:none;"><li><a href="privacy.php">سياسة الخصوصية</a></li><li><a href="contact.php">اتصل بنا</a></li></ul>
+        </div>
+        <div style="flex:1;min-width:180px;">
+            <h4>تواصل معنا</h4>
+            <ul style="list-style:none;"><li><i class="fas fa-envelope" style="color:#2563eb;"></i> info@matjari.com</li></ul>
+        </div>
+    </div>
+    <div style="text-align:center;margin-top:30px;padding-top:20px;border-top:2px solid #1e293b;font-size:14px;">
+        <p>متجري. جميع الحقوق محفوظة 2026 ©</p>
+    </div>
 </footer>
 
 <script>
-    function toggleEditForm(reviewId) {
-        const form = document.getElementById('edit-form-' + reviewId);
-        form.classList.toggle('active');
-    }
+const productId = <?php echo $product_id; ?>;
 
-    function addToCart(productId, productName, price) {
-        fetch('add_to_cart.php', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'product_id=' + productId + '&quantity=1'
-        })
-        .then(r => r.json())
-        .then(d => {
-            if (d.success) { alert('✅ تمت إضافة "' + productName + '" إلى السلة!'); location.reload(); }
-            else { alert('❌ ' + (d.message || 'خطأ')); }
-        })
-        .catch(() => alert('❌ خطأ في الاتصال'));
-    }
+function changeImage(imgSrc, element) {
+    document.getElementById('mainImage').src = imgSrc;
+    document.querySelectorAll('.thumbnails img').forEach(el => el.classList.remove('active'));
+    if (element) element.classList.add('active');
+}
 
-    function toggleWishlist(productId, btn) {
-        fetch('toggle_wishlist.php', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'product_id=' + productId
-        })
-        .then(r => r.json())
-        .then(d => {
-            if (d.success) { btn.classList.toggle('active'); location.reload(); }
-            else { alert('❌ ' + (d.message || 'يجب تسجيل الدخول')); }
-        });
-    }
+function addToCart() {
+    const btn = document.querySelector('.btn-primary');
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الإضافة...';
+    btn.disabled = true;
+    
+    fetch(window.location.href, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ action: 'add_to_cart', product_id: productId, quantity: 1 })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            btn.innerHTML = '<i class="fas fa-check"></i> تمت الإضافة!';
+            btn.style.background = '#22c55e';
+            const badge = document.querySelector('a[href="cart.php"] .badge');
+            if (badge) badge.textContent = (parseInt(badge.textContent) || 0) + 1;
+            setTimeout(() => { btn.innerHTML = originalText; btn.style.background = ''; btn.disabled = false; }, 2000);
+        } else {
+            alert(data.message);
+            btn.innerHTML = originalText; btn.disabled = false;
+        }
+    })
+    .catch(() => { btn.innerHTML = originalText; btn.disabled = false; });
+}
+
+function addSimilarToCart(pid, button) {
+    const originalText = button.innerHTML;
+    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+    button.disabled = true;
+    
+    fetch(window.location.href, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ action: 'add_to_cart', product_id: pid, quantity: 1 })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            button.innerHTML = '<i class="fas fa-check"></i> تمت';
+            button.style.background = '#22c55e';
+            setTimeout(() => { button.innerHTML = originalText; button.style.background = ''; button.disabled = false; }, 2000);
+        } else {
+            alert(data.message);
+            button.innerHTML = originalText; button.disabled = false;
+        }
+    })
+    .catch(() => { button.innerHTML = originalText; button.disabled = false; });
+}
+
+function buyNow() {
+    fetch(window.location.href, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ action: 'add_to_cart', product_id: productId, quantity: 1 })
+    })
+    .then(r => r.json())
+    .then(data => { if (data.success) window.location.href = 'checkout.php'; })
+    .catch(() => alert('خطأ، يرجى المحاولة مرة أخرى'));
+}
+
+function toggleWishlist() {
+    const btn = document.getElementById('wishlistBtn');
+    fetch(window.location.href, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ action: 'toggle_wishlist', product_id: productId })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            btn.classList.toggle('active');
+            const badge = document.querySelector('a[href="wishlist.php"] .badge');
+            if (badge) {
+                let count = parseInt(badge.textContent) || 0;
+                if (data.action === 'added') badge.textContent = count + 1;
+                else { badge.textContent = count - 1; if (badge.textContent == 0) badge.remove(); }
+            }
+        }
+    });
+}
+
+// إرسال التقييم
+document.getElementById('reviewForm')?.addEventListener('submit', function(e) {
+    e.preventDefault();
+    const rating = document.querySelector('input[name="rating"]:checked')?.value;
+    const comment = document.querySelector('textarea[name="comment"]').value;
+    
+    if (!rating) { alert('يرجى اختيار تقييم'); return; }
+    if (!comment.trim()) { alert('يرجى كتابة تعليق'); return; }
+
+    fetch(window.location.href, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ action: 'submit_review', rating: rating, comment: comment })
+    })
+    .then(r => r.json())
+    .then(data => {
+        alert(data.message);
+        if (data.success) window.location.reload();
+    })
+    .catch(() => alert('حدث خطأ، حاول لاحقاً'));
+});
 </script>
 </body>
 </html>
